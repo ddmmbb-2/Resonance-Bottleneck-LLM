@@ -116,27 +116,41 @@ class ResonanceMemoryAttentionV15(nn.Module):
         prev_s = torch.zeros(B, self.n_heads, self.d_head, self.d_head, device=x.device)
         prev_z = torch.zeros(B, self.n_heads, self.d_head, device=x.device)
 
-        for t in range(L):
-            kt = k_f[:, t]
-            vt = v_f[:, t]
-            gt = gate[:, t].view(B, self.n_heads, 1, 1)
-            
-            dt = decay_rate[:, t].view(B, self.n_heads, 1, 1)
-            dt_z = decay_rate[:, t].view(B, self.n_heads, 1)
+        # ==================================================
+        # 🚀 極速優化版：將矩陣運算提煉到迴圈外，拯救 GPU 效能！
+        # ==================================================
+        # 1. 一口氣計算好所有的 K @ V 和 Gate 增益
+        # [B, L, heads, d_head, 1] @ [B, L, heads, 1, d_head] -> [B, L, heads, d_head, d_head]
+        kv_all = k_f.unsqueeze(-1) @ v_f.unsqueeze(-2)
+        gate_ext = gate.view(B, L, self.n_heads, 1, 1)
+        kv_all = kv_all * (1.0 + gate_ext)
+        
+        # 2. 一口氣準備好所有的 Decay 係數
+        dt_all = decay_rate.view(B, L, self.n_heads, 1, 1)
+        inv_dt_all = 1.0 - dt_all
+        
+        dt_z_all = decay_rate.view(B, L, self.n_heads, 1)
+        inv_dt_z_all = 1.0 - dt_z_all
 
-            current_kv = (kt.unsqueeze(-1) @ vt.unsqueeze(-2)) * (1.0 + gt)
-            
-            # 🌟 EMA 更新邏輯 (穩定殘差) 與 Memory Clipping 防爆
-            new_s = prev_s * dt + current_kv * (1.0 - dt)
+        states = []
+        z_states = [] 
+        prev_s = torch.zeros(B, self.n_heads, self.d_head, self.d_head, device=x.device)
+        prev_z = torch.zeros(B, self.n_heads, self.d_head, device=x.device)
+
+        # 3. 唯一的迴圈！裡面現在「只有」最簡單的殘差加法，速度會快非常多
+        for t in range(L):
+            # EMA 更新 Memory
+            new_s = prev_s * dt_all[:, t] + kv_all[:, t] * inv_dt_all[:, t]
             new_s = torch.clamp(new_s, -10.0, 10.0) 
             
-            # 🌟 EMA 更新 Denominator 狀態 (保證 Scale 正確)
-            new_z = prev_z * dt_z + kt * (1.0 - dt_z)
+            # EMA 更新 Normalizer
+            new_z = prev_z * dt_z_all[:, t] + k_f[:, t] * inv_dt_z_all[:, t]
 
             states.append(new_s)
             z_states.append(new_z)
             prev_s = new_s
             prev_z = new_z
+        # ==================================================
 
         kv_states = torch.stack(states, dim=2) # [B, heads, L, d_head, d_head]
         z_states = torch.stack(z_states, dim=1) # [B, L, heads, d_head]
