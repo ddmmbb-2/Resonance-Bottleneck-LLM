@@ -20,7 +20,7 @@ config = {
     "n_layers": 24,          
     "batch_size": 2,         
     "block_size": 768,       
-    "accum_steps": 1,       
+    "accum_steps": 4,       
     "lr": 2e-4,              
     "epochs": 40000,         
     "warmup_steps": 2000,    
@@ -224,19 +224,36 @@ class D2V15Model(nn.Module):
 
 
 # ==========================================
-# 3. 訓練流程與日誌紀錄 (V15 EMA 終極版)
+# 3. 訓練流程與日誌紀錄 (V15 智慧巡航版)
 # ==========================================
 model = D2V15Model(vocab_size, config["d_model"], config["n_layers"]).to(device)
 optimizer = torch.optim.AdamW(model.parameters(), lr=config["lr"], weight_decay=0.01)
 
+global_step = 0
+if os.path.exists(config["save_model"]):
+    print(f"♻️ 發現舊存檔 {config['save_model']}，正在接續訓練...")
+    ckpt = torch.load(config["save_model"], map_location=device, weights_only=False)
+    model.load_state_dict(ckpt['model_state_dict'])
+    if 'optimizer_state_dict' in ckpt:
+        optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+    global_step = ckpt.get('step', 0)
+    print(f"📈 從 Step {global_step} 繼續起飛！")
+else:
+    print("🆕 未發現存檔，從頭開始訓練。")
+
+# --- LR 管理系統 ---
 def lr_lambda(current_step):
     if current_step < config["warmup_steps"]:
         return float(current_step) / float(max(1, config["warmup_steps"]))
-    progress = float(current_step - config["warmup_steps"]) / float(max(1, config["epochs"] - config["warmup_steps"]))
-    return max(0.1, 0.5 * (1.0 + math.cos(math.pi * progress)))
+    return 1.0 # 暖身完後保持 100%，由 Plateau 接手
 
-scheduler = LambdaLR(optimizer, lr_lambda)
-global_step = 0
+# 暖身調度器
+warmup_scheduler = LambdaLR(optimizer, lr_lambda, last_epoch=global_step - 1)
+
+# 反應式調度器 (暖身後啟用)
+auto_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    optimizer, mode='min', factor=0.5, patience=5, verbose=True
+)
 
 print(f"🌟 初始化 V15 大腦 | 參數: {sum(p.numel() for p in model.parameters())/1e6:.1f}M")
 model.train()
@@ -251,11 +268,9 @@ while global_step < config["epochs"]:
         with autocast('cuda', dtype=torch.bfloat16):
             logits, sparse_loss, balance_loss, entropy_loss = model(xb)
             ce_loss = F.cross_entropy(logits.view(-1, vocab_size), yb.view(-1))
-            
             loss = (ce_loss + config["l1_lambda"] * sparse_loss + 
                     config["balance_lambda"] * balance_loss + 
                     config["entropy_lambda"] * entropy_loss) / config["accum_steps"]
-            
         loss.backward()
         total_loss += ce_loss.item()
         total_sparse += sparse_loss.item()
@@ -263,24 +278,56 @@ while global_step < config["epochs"]:
         total_ent += entropy_loss.item()
 
     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
-    optimizer.step(); scheduler.step(); global_step += 1; pbar.update(1)
+    optimizer.step()
     
-    current_lr = scheduler.get_last_lr()[0]
+    # 🌟 計算當前平均 Loss (供調度器使用)
     avg_loss = total_loss / config["accum_steps"]
     avg_sparse = total_sparse / config["accum_steps"]
     avg_ent = total_ent / config["accum_steps"]
-    
-    pbar.set_postfix({"Loss": f"{avg_loss:.4f}", "Gate": f"{avg_sparse:.3f}", "Ent": f"{avg_ent:.3f}"})
 
+    # 🌟 智慧 LR 切換邏輯
+    if global_step < config["warmup_steps"]:
+        warmup_scheduler.step() # 暖身期：按步數爬升
+    else:
+        # 暖身後：每 100 步讓 Plateau 檢查一次 Loss 進度
+        if global_step % 100 == 0:
+            auto_scheduler.step(avg_loss) 
+
+    global_step += 1
+    pbar.update(1)
+    
+    current_lr = optimizer.param_groups[0]['lr'] # 直接從優化器抓最新的 LR
+    pbar.set_postfix({"Loss": f"{avg_loss:.4f}", "LR": f"{current_lr:.2e}", "Gate": f"{avg_sparse:.3f}"})
+
+    # --- 日誌與存檔 (這部分保持在 while 迴圈內) ---
     if global_step % 10 == 0:
         log_file = "train_log.csv"
         file_exists = os.path.isfile(log_file) and os.path.getsize(log_file) > 0
         with open(log_file, "a", encoding="utf-8") as f:
-            if not file_exists: 
-                f.write("step,loss,lr,gate,entropy\n") 
+            if not file_exists: f.write("step,loss,lr,gate,entropy\n") 
             f.write(f"{global_step},{avg_loss:.6f},{current_lr:.2e},{avg_sparse:.6f},{avg_ent:.6f}\n")
 
+    # 修正後的存檔區塊 (注意 if 後面要有 4 個空格的縮排)
     if global_step % 2000 == 0:
-        torch.save({'step': global_step, 'model_state_dict': model.state_dict(), 
-                    'optimizer_state_dict': optimizer.state_dict(), 
-                    'scheduler_state_dict': scheduler.state_dict()}, config["save_model"])
+        # 1. 儲存帶有步數的里程碑 (例如 d2_v15_step_4000.pth)
+        checkpoint_name = f"d2_v15_step_{global_step}.pth"
+        
+        save_data = {
+            'step': global_step, 
+            'model_state_dict': model.state_dict(), 
+            'optimizer_state_dict': optimizer.state_dict()
+        }
+        
+        # 2. 原子寫入：先存 tmp 再改名
+        tmp_path = config["save_model"] + ".tmp"
+        torch.save(save_data, tmp_path)
+        
+        if os.path.exists(config["save_model"]):
+            os.remove(config["save_model"])
+        os.rename(tmp_path, config["save_model"])
+        
+        # 3. 同時儲存一份帶步數的檔案
+        torch.save(save_data, checkpoint_name) 
+        print(f"🚩 Step {global_step} 存檔成功！已備份至 {checkpoint_name}")
+
+# --- 迴圈結束 (這行縮排與 while 對齊) ---
