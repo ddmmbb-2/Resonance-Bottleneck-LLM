@@ -69,9 +69,12 @@ $$\text{Interference} = A_{sem} \cdot A_{ctx} \cdot \cos(\theta_{sem} - \theta_{
    ```
 2. **運行訓練：**
    ```bash
-   python d2-v13-resonance.py
+   python Resonance-Bottleneck-LLM.py
    ```
-
+3. **運行監控：**
+   ```bash
+   python monitor_resonance.py
+   ```
 ---
 
 ## 📜 授權協議 (License)
