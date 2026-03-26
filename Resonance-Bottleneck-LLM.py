@@ -89,25 +89,23 @@ def get_batch():
 # 2. V12 模型架構 (QLLM2 波干涉 + 權重綁定)
 # ==========================================
 class CausalGatedD2Attention(nn.Module):
-    # 🆕 新增 bottleneck_rank 參數，預設設為 64 (溫和瓶頸)
-    def __init__(self, d_model, bottleneck_rank=64):
+    def __init__(self, d_model, bottleneck_rank=128): # 🆕 提升至 128
         super().__init__()
         self.n_heads = config["n_heads"]
         self.d_head = d_model // self.n_heads
         
-        # 📌 策略 B：特徵主幹道絕不妥協，保持全維度 (記憶體容量擔當)
+        # 特徵主幹道
         self.qkv = nn.Linear(d_model, d_model * 3)
         
-        # 📌 策略 A + B：語義波干涉控制中心 (微型化)
-        # 降維 -> 非線性思考 -> 升維
+        # 🆕 V13-Stable 共振瓶頸層
         self.sem_down = nn.Linear(d_model, bottleneck_rank, bias=False)
-        self.sem_act = nn.SiLU() # 加入 SiLU 讓極窄通道也能處理非線性邏輯
         self.sem_up = nn.Linear(bottleneck_rank, d_model * 2, bias=False)
         
-        # 📌 策略 A + B：上下文波干涉控制中心 (微型化)
         self.ctx_down = nn.Linear(d_model, bottleneck_rank, bias=False)
-        self.ctx_act = nn.SiLU()
         self.ctx_up = nn.Linear(bottleneck_rank, d_model * 2, bias=False)
+        
+        # 溫度參數，防止 Sigmoid 飽和
+        self.temperature = nn.Parameter(torch.ones(1) * 0.5) 
         
         self.proj = nn.Linear(d_model, d_model)
         self.ln = nn.LayerNorm(d_model)
@@ -118,21 +116,28 @@ class CausalGatedD2Attention(nn.Module):
         
         q, k, v = self.qkv(x_norm).chunk(3, dim=-1)
         
-        # 🌊 混血策略實作：透過瓶頸層生成干涉波
-        # 從 768 -> 64 -> 1536，強迫提煉出最核心的「基頻」
-        sem_params = self.sem_up(self.sem_act(self.sem_down(x)))
-        sem_amp, sem_phase = sem_params.chunk(2, dim=-1)
-        sem_amp = F.softplus(sem_amp) 
+        # 🌊 穩定的波參數生成
+        # 語義波
+        sem_feat = F.silu(self.sem_down(x))
+        sem_amp, sem_phase = self.sem_up(sem_feat).chunk(2, dim=-1)
+        sem_amp = F.softplus(sem_amp)
+        sem_phase = torch.tanh(sem_phase) * math.pi # 🆕 相位錨定在 [-π, π]
         
-        ctx_params = self.ctx_up(self.ctx_act(self.ctx_down(x)))
-        ctx_amp, ctx_phase = ctx_params.chunk(2, dim=-1)
+        # 上下文波
+        ctx_feat = F.silu(self.ctx_down(x))
+        ctx_amp, ctx_phase = self.ctx_up(ctx_feat).chunk(2, dim=-1)
         ctx_amp = F.softplus(ctx_amp)
+        ctx_phase = torch.tanh(ctx_phase) * math.pi # 🆕 相位錨定在 [-π, π]
         
-        # 後續波干涉與注意力機制維持不變
-        interference = sem_amp * ctx_amp * torch.cos(sem_phase - ctx_phase)
+        # 🌊 計算相干涉 (Coherence)
+        # 加上溫度控制與殘差門控
+        interference = (sem_amp * ctx_amp * torch.cos(sem_phase - ctx_phase)) * self.temperature
         gate = torch.sigmoid(interference)
-        k = k * gate 
         
+        # 🆕 殘差門控：k = k + k * gate (確保基礎梯度不消失)
+        k = k * (1.0 + gate) 
+        
+        # ... 後續 Linear Attention 計算保持不變 ...
         q = q.view(B, L, self.n_heads, self.d_head).transpose(1, 2)
         k = k.view(B, L, self.n_heads, self.d_head).transpose(1, 2)
         v = v.view(B, L, self.n_heads, self.d_head).transpose(1, 2)
@@ -147,8 +152,7 @@ class CausalGatedD2Attention(nn.Module):
         k_cumsum = torch.cumsum(k_f, dim=2)
         out_den = (q_f * k_cumsum).sum(dim=-1, keepdim=True) + 1e-6
         
-        attn_out = out_num / out_den
-        attn_out = attn_out.to(x.dtype)
+        attn_out = (out_num / out_den).to(x.dtype)
         attn_out = attn_out.transpose(1, 2).contiguous().view(B, L, D)
         
         return self.proj(attn_out), gate
