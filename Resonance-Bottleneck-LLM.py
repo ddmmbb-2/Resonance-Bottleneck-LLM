@@ -20,7 +20,7 @@ config = {
     "n_layers": 24,          
     "batch_size": 2,         
     "block_size": 768,       
-    "accum_steps": 12,       
+    "accum_steps": 1,       
     "lr": 2e-4,              
     "epochs": 40000,         
     "warmup_steps": 2000,    
@@ -137,23 +137,20 @@ class ResonanceMemoryAttentionV15(nn.Module):
         prev_s = torch.zeros(B, self.n_heads, self.d_head, self.d_head, device=x.device)
         prev_z = torch.zeros(B, self.n_heads, self.d_head, device=x.device)
 
-        # 3. 唯一的迴圈！裡面現在「只有」最簡單的殘差加法，速度會快非常多
-        for t in range(L):
-            # EMA 更新 Memory
-            new_s = prev_s * dt_all[:, t] + kv_all[:, t] * inv_dt_all[:, t]
-            new_s = torch.clamp(new_s, -10.0, 10.0) 
-            
-            # EMA 更新 Normalizer
-            new_z = prev_z * dt_z_all[:, t] + k_f[:, t] * inv_dt_z_all[:, t]
-
-            states.append(new_s)
-            z_states.append(new_z)
-            prev_s = new_s
-            prev_z = new_z
         # ==================================================
-
-        kv_states = torch.stack(states, dim=2) # [B, heads, L, d_head, d_head]
-        z_states = torch.stack(z_states, dim=1) # [B, L, heads, d_head]
+        # 🚀 V15-Fast 極速並行版：消滅 for 迴圈，解放 3060 算力！
+        # ==================================================
+        # 1. 準備好 K@V 與 Gate 增益 (Memory Filter 依然存在)
+        kv_all = k_f.unsqueeze(-1) @ v_f.unsqueeze(-2) # [B, L, heads, d, d]
+        gate_ext = gate.view(B, L, self.n_heads, 1, 1)
+        
+        # 2. 動態過濾：只有 Gate 高的詞，才能進入記憶體
+        kv_gated = kv_all * (1.0 + gate_ext)
+        
+        # 3. 🚀 核心魔法：用 PyTorch C++ 原生的 cumsum 瞬間完成時間維度 (dim=1) 的累積
+        kv_states = torch.cumsum(kv_gated, dim=1).transpose(1, 2) # 轉回 [B, heads, L, d, d]
+        z_states = torch.cumsum(k_f, dim=1) # [B, L, heads, d_head]
+        # ==================================================
 
         # 計算分子
         q_f_trans = q_f.transpose(1, 2).unsqueeze(-2) # [B, heads, L, 1, d_head]
