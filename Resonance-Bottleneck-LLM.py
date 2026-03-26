@@ -279,6 +279,18 @@ while global_step < config["epochs"]:
         "LR": f"{current_lr:.2e}",
         "Gate": f"{avg_sparse:.3f}"
     })
+
+    # 🆕 修正後的紀錄邏輯
+    if global_step % 10 == 0:
+        log_file = "train_log.csv"
+        # 檢查檔案是否已存在，且裡面是否有內容
+        file_exists = os.path.isfile(log_file) and os.path.getsize(log_file) > 0
+        
+        with open(log_file, "a", encoding="utf-8") as f:
+            # 只有當檔案是新建立的，才寫入表頭
+            if not file_exists:
+                f.write("step,loss,lr,gate\n")
+            f.write(f"{global_step},{avg_loss:.6f},{current_lr:.2e},{avg_sparse:.6f}\n")
         
     if global_step % 2000 == 0:
         checkpoint_data = {
