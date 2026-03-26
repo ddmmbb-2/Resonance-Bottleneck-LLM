@@ -1,84 +1,99 @@
 
+# 🌊 Resonance Memory Transformer (D2-V15)
 
-# 🌊 Resonance-Bottleneck-LLM (D2-V13)
+**Resonance Memory Transformer (共振記憶轉換器)** 是一個探索 **「波干涉隱式門控」** 與 **「線性注意力記憶過濾」** 結合的實驗性大型語言模型 (LLM) 架構。
 
-**Resonance Bottleneck (共振瓶頸)** 是一個實驗性的輕量級大語言模型架構，核心在於探索如何透過極低維度的「資訊瓶頸」來激發模型內在的推理與特徵對齊能力。
-
-本專案是 `D2-Subset-LLM` 系列的進化版（V13），結合了物理學中的**波干涉 (Wave-Interference)** 概念與 **TinyLoRA** 的極簡參數理念。
-
----
-
-## 🧠 核心理念：共振瓶頸 (Resonance Bottleneck)
-
-傳統模型在處理路由（Routing）或門控（Gating）時，往往使用龐大的參數矩陣，這容易導致模型死記硬背訓練資料中的雜訊。
-
-**Resonance Bottleneck** 採用了「A+B 混血策略」：
-1. **主特徵道 (Full-Rank Path)：** `QKV` 投影維持全維度（768），確保模型有足夠的容量記憶語言知識與程式碼邏輯。
-2. **共振控制中心 (Bottleneck Control)：** 將負責波干涉的 `Semantic` 與 `Context` 銀行壓縮至極窄的通道（$768 \to 64$），並透過 `SiLU` 激活函數進行非線性過濾，最後再放大還原。
-
-> **物理比喻：** 就像寬廣的海浪（特徵）被迫擠過一個微小的狹縫（瓶頸），只有最具代表性、最強大的語義頻率能產生「共振」並穿透過去，最終透過干涉效應（Interference）精準地操控模型的大腦開關。
-
-
-
-![Resonance Bottleneck 原理圖](licensed-image.jpg)
-
+本專案從 `D2-Subset-LLM` 演進而來，在 **V15** 版本中實現了重大突破：捨棄了傳統的無狀態線性注意力（Stateless Linear Attention），引入了受生物神經學啟發的 **EMA 記憶衰減機制 (Memory Decay)** 與 **雙重限幅共振系統 (Dual-Bounded Resonance)**，在保持 $O(N)$ 線性複雜度的同時，賦予模型強大的長文本邏輯提煉能力。
 
 ---
 
-## ✨ 架構特色
+## 🧠 核心理念：為什麼需要「共振記憶」？
 
-* **O(N) 線性複雜度：** 採用 **Causal Linear Attention**，記憶體需求隨序列長度線性增長，而非平方增長。
-* **隱式專家系統 (Implicit MoE)：** 無須顯式的 Router，透過波的相位差（Phase Difference）自然湧現專家分工。
-* **BPE Tokenizer：** 使用自定義的 16K BPE 詞表，大幅提升文本壓縮率與語義理解深度。
-* **RTX 3060 優化：** 針對 12GB VRAM 進行極致優化，支援 BF16 混合精度訓練。
+傳統的線性注意力機制容易隨著序列長度增加而產生「記憶模糊」與「數值爆炸」。而傳統的 MoE (Mixture of Experts) 則需要龐大且離散的 Router 參數。
 
----
+**V15 架構透過以下機制解決這些痛點：**
 
-## 📐 數學核心 (Mathematical Core)
-
-共振干涉公式定義如下：
-
-$$\text{Interference} = A_{sem} \cdot A_{ctx} \cdot \cos(\theta_{sem} - \theta_{ctx})$$
-
-其中 $A$ 與 $\theta$ 是由 **Resonance Bottleneck** 層產生的振幅與相位：
-* $x_{compressed} = \text{SiLU}(W_{down} \cdot x)$
-* $[A, \theta] = W_{up} \cdot x_{compressed}$
+1. **波干涉隱式路由 (Wave-Interference Routing)：**
+   不使用顯式的專家網路。模型將上下文特徵映射為「波」的**振幅 (Amplitude)** 與 **相位 (Phase)**。透過不同特徵間的干涉（相長或相消），自然湧現出針對特定語境的激活狀態（Gate）。
+2. **多頭記憶過濾器 (Head-wise Memory Filter)：**
+   每個 Attention Head 擁有獨立的共振頻率與衰減率（Decay）。模型不再只是「決定要看什麼」，而是透過動態的 Gate 控制「哪些歷史記憶需要被保留與放大」，哪些需要被遺忘。
 
 ---
 
-## 📈 訓練日誌 (Training Progress)
+## ✨ V15 突破性架構升級 (The "++" Features)
 
-在初步的實驗中，我們觀察到了顯著的「頓悟（Grokking）」現象：
-
-| Step | Loss | Gate Active | Learning Rate | 狀態描述 |
-| :--- | :--- | :--- | :--- | :--- |
-| 41 | 207.06 | 0.605 | 4.10e-06 | 隨機混沌期，瓶頸層適應中 |
-| 215 | **35.22** | **0.429** | 2.15e-05 | **快速開竅期**，模型開始主動抑制雜訊 |
-
-* **模型規模：** ~189.8M Parameters
-* **訓練設備：** NVIDIA GeForce RTX 3060 12GB
-* **數據集：** Wikipedia (Multi-lang) + Classical Chinese + Python Code
+* **EMA 記憶衰減 (Exponential Moving Average Decay)：**
+  將單純的記憶累加 ($cumsum$) 升級為帶有遺忘機制的 RNN 狀態更新，賦予模型「近因偏差」並防止記憶堆積崩塌。
+* **嚴格的數學對齊 (Denominator Normalization)：**
+  同步使用 EMA 更新分母 (Normalizer) 狀態 $Z_t$，徹底解決線性注意力中極易發生的 Scale 飄移問題。
+* **雙重限幅穩定器 (Dual Bounding)：**
+  使用 $\text{Sigmoid}$ 限制振幅，使用 $\text{Tanh}$ 將相位錨定於 $[-\pi, \pi]$，並對最終干涉進行阻尼運算，確保梯度流動極度平滑。
+* **熵正則化 (Entropy Loss)：**
+  引入 Gate Entropy 懲罰項，防止門控機制坍縮（Collapse）為全 0 或全 1 的退化狀態。
 
 ---
 
-## 🛠️ 快速開始
+## 📐 數學核心 (Mathematical Formulation)
 
-1. **環境準備：**
-   ```bash
-   pip install torch tokenizers tqdm
-   ```
-2. **運行訓練：**
-   ```bash
-   python Resonance-Bottleneck-LLM.py
-   ```
-3. **運行監控：**
-   ```bash
-   python monitor_resonance.py
-   ```
----
+在 V15 中，隱藏狀態 $S_t$ 與分母 $Z_t$ 的更新遵循嚴格的指數移動平均（EMA）結合共振門控（$Gate_t$）：
 
-## 📜 授權協議 (License)
+**1. 共振門控計算 (Resonance Gating):**
+$$Gate_t = \sigma\left(\tanh(A_{sem} \cdot A_{ctx} \cdot \cos(\theta_{sem} - \theta_{ctx})) \cdot Temp\right)$$
 
-本專案採用 **MIT License** 授權。核心波函數機制靈感源自 [qllm2](https://github.com/gowrav-vishwakarma/qllm2) 並由本人進行架構重組與優化。
+**2. 記憶狀態更新 (Memory State Update):**
+$$S_t = S_{t-1} \cdot dt + \Big((K_t \otimes V_t) \cdot (1 + Gate_t)\Big) \cdot (1 - dt)$$
+
+**3. 歸一化器更新 (Normalizer Update):**
+$$Z_t = Z_{t-1} \cdot dt + K_t \cdot (1 - dt)$$
+
+*(註：$dt$ 為模型自適應學習出的衰減率 Decay，限制於 0.1 ~ 0.99 之間)*
 
 ---
+
+## 🚀 系統規格與效能
+
+* **參數規模 (Parameters)：** ~190M Parameters (甜甜圈區間，完美適配消費級 GPU)
+* **硬體需求：** 單張 **NVIDIA RTX 3060 12GB** 即可進行全量從頭訓練 (Train from scratch)。
+* **精度與優化：** 原生支援 `bfloat16` 混合精度與 Gradient Checkpointing。
+* **分詞器 (Tokenizer)：** 自定義 16K BPE 字典，極大化文本壓縮率與語義密度。
+* **計算複雜度：** 推理與顯存佔用均為 $O(N)$。
+
+---
+
+## 🛠️ 快速開始 (Quick Start)
+
+**1. 安裝依賴環境**
+```bash
+pip install torch transformers tokenizers tqdm pandas matplotlib
+```
+
+**2. 準備訓練數據**
+將你的 `.txt` 語料庫（如 Wikipedia、程式碼等）放入 `data/` 資料夾中。
+
+**3. 啟動 V15 模型訓練**
+```bash
+python d2-v15-resonance-plus.py
+```
+
+**4. 啟動異步訓練監控 (推薦)**
+在另一個終端機執行監控腳本，即時觀測 Loss 大跳水與 Gate 共振的過程：
+```bash
+python monitor_resonance.py
+```
+
+---
+
+## 📊 監控指標說明
+
+訓練過程中，除了標準的 Cross-Entropy Loss，我們引入了兩個觀察模型「心智健康度」的關鍵指標：
+* **Gate (Sparsity):** 反映共振機制的激活比例。健康的模型通常會在初期波動，隨後穩定在 `0.3 ~ 0.6` 之間，展現出良好的抗噪特徵。
+* **Ent (Entropy):** 門控的資訊熵。若趨近於 0，代表發生了 Routing Collapse，模型失去了記憶篩選的多樣性。
+
+---
+
+## 📜 授權協議與致謝 (License & Acknowledgements)
+
+* 本專案採用 **MIT License** 授權。
+* 本架構的核心波函數與相位概念，最初靈感源自 [qllm2](https://github.com/gowrav-vishwakarma/qllm2) 專案，並在此基礎上進行了深度的數學重構與架構演進（引入 EMA、Memory Filter 與雙重限幅）。
+```
+
