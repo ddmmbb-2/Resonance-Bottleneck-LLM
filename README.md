@@ -20,7 +20,7 @@
 
 
 
-[Image of wave interference through a narrow slit]
+![Resonance Bottleneck 原理圖](licensed-image.jpg)
 
 
 ---
