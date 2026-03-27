@@ -17,13 +17,13 @@ from tokenizers import Tokenizer, models, decoders, trainers, pre_tokenizers
 config = {
     "d_model": 768,          
     "n_heads": 12,           
-    "n_layers": 24,          
-    "batch_size": 2,         
-    "block_size": 768,       
-    "accum_steps": 4,       
+    "n_layers": 12,          
+    "batch_size": 1,         
+    "block_size": 512,       
+    "accum_steps": 8,       
     "lr": 2e-4,              
     "epochs": 40000,         
-    "warmup_steps": 2000,    
+    "warmup_steps": 3000,    
     "data_dir": "data",      
     "save_model": "d2_v15_resonance_plus.pth", # 🆕 V15 專屬權重檔
     "vocab_name": "bpe_tokenizer_v12.json",     
