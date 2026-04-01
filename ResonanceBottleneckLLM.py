@@ -220,6 +220,18 @@ while global_step < config["epochs"]:
         auto_scheduler.step(avg_loss)
 
     global_step += 1
+    # --- 插入這段：日誌寫入 CSV ---
+    if global_step % 10 == 0:  # 每 10 步紀錄一次
+        log_file = "train_log.csv"
+        avg_sparse = total_sparse / config["accum_steps"]
+        avg_ent = total_ent / config["accum_steps"]
+        current_lr = optimizer.param_groups[0]['lr']
+        
+        file_exists = os.path.isfile(log_file) and os.path.getsize(log_file) > 0
+        with open(log_file, "a", encoding="utf-8") as f:
+            if not file_exists: 
+                f.write("step,loss,lr,gate,entropy\n") # 寫入標頭
+            f.write(f"{global_step},{avg_loss:.6f},{current_lr:.2e},{avg_sparse:.6f},{avg_ent:.6f}\n")
     pbar.update(1)
     pbar.set_postfix({"Loss": f"{avg_loss:.4f}", "Gate": f"{total_sparse/config['accum_steps']:.3f}"})
 
