@@ -194,7 +194,7 @@ class D2V15Model(nn.Module):
         return logits, sparse_loss, balance_loss, entropy_loss
 
 # ==========================================
-# 3. 訓練循環
+# 3. 訓練循環 (熱重啟優化版)
 # ==========================================
 model = D2V15Model(vocab_size, config["d_model"], config["n_layers"]).to(device)
 optimizer = torch.optim.AdamW(model.parameters(), lr=config["lr"], weight_decay=0.01)
@@ -207,10 +207,18 @@ if os.path.exists(config["save_model"]):
     optimizer.load_state_dict(ckpt['optimizer_state_dict'])
     global_step = ckpt.get('step', 0)
 
-warmup_scheduler = LambdaLR(optimizer, lambda s: min(1.0, s/config["warmup_steps"]))
+# --- 核心修復：強制重置學習率與相對調度器 ---
+for param_group in optimizer.param_groups:
+    param_group['lr'] = config["lr"]
+
+# 紀錄重啟時的起點，用來計算相對暖身
+restart_step = global_step 
+warmup_scheduler = LambdaLR(optimizer, lambda s: min(1.0, (s + 1) / config["warmup_steps"]))
 auto_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
 
 print(f"🌟 模型參數: {sum(p.numel() for p in model.parameters())/1e6:.1f}M")
+print(f"🚀 已喚醒模型！將從 Step {global_step} 開始進行 {config['warmup_steps']} 步相對暖身。")
+
 model.train()
 pbar = tqdm(initial=global_step, total=config["epochs"], desc="🧠 V15 訓練中")
 
@@ -235,14 +243,18 @@ while global_step < config["epochs"]:
     optimizer.step()
     
     avg_loss = total_loss / config["accum_steps"]
-    if global_step < config["warmup_steps"]:
+    
+    # --- 智慧 LR 調度 (相對判斷) ---
+    current_relative_step = global_step - restart_step
+    if current_relative_step < config["warmup_steps"]:
         warmup_scheduler.step()
     elif global_step % 100 == 0:
         auto_scheduler.step(avg_loss)
 
     global_step += 1
-    # --- 插入這段：日誌寫入 CSV ---
-    if global_step % 10 == 0:  # 每 10 步紀錄一次
+    
+    # --- 關鍵：CSV 日誌紀錄 ---
+    if global_step % 10 == 0:
         log_file = "train_log.csv"
         avg_sparse = total_sparse / config["accum_steps"]
         avg_ent = total_ent / config["accum_steps"]
@@ -251,11 +263,17 @@ while global_step < config["epochs"]:
         file_exists = os.path.isfile(log_file) and os.path.getsize(log_file) > 0
         with open(log_file, "a", encoding="utf-8") as f:
             if not file_exists: 
-                f.write("step,loss,lr,gate,entropy\n") # 寫入標頭
+                f.write("step,loss,lr,gate,entropy\n")
             f.write(f"{global_step},{avg_loss:.6f},{current_lr:.2e},{avg_sparse:.6f},{avg_ent:.6f}\n")
-    pbar.update(1)
-    pbar.set_postfix({"Loss": f"{avg_loss:.4f}", "Gate": f"{total_sparse/config['accum_steps']:.3f}"})
 
+    pbar.update(1)
+    pbar.set_postfix({
+        "Loss": f"{avg_loss:.4f}", 
+        "LR": f"{optimizer.param_groups[0]['lr']:.2e}", 
+        "Gate": f"{total_sparse/config['accum_steps']:.3f}"
+    })
+
+    # --- 自動存檔 ---
     if global_step % 2000 == 0:
         torch.save({
             'step': global_step, 
