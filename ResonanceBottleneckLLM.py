@@ -60,7 +60,7 @@ def get_batch():
     return x.to(device), y.to(device)
 
 # ==========================================
-# 2. V15 核心架構：共振記憶注意力
+# 2. V15 核心架構：共振記憶注意力 (自適應衰減版)
 # ==========================================
 class ResonanceMemoryAttentionV15(nn.Module):
     def __init__(self, d_model, bottleneck_rank=128):
@@ -69,6 +69,7 @@ class ResonanceMemoryAttentionV15(nn.Module):
         self.d_head = d_model // self.n_heads
         self.qkv = nn.Linear(d_model, d_model * 3)
         
+        # Bottleneck 輸出 5 個分量：A1, P1, A2, P2, Decay
         self.bottleneck = nn.Sequential(
             nn.Linear(d_model, bottleneck_rank, bias=False),
             nn.SiLU(),
@@ -85,14 +86,18 @@ class ResonanceMemoryAttentionV15(nn.Module):
         x_norm = self.ln(x)
         q, k, v = self.qkv(x_norm).chunk(3, dim=-1)
         
-        # 🌊 共振參數生成
+        # 🌊 1. 參數生成
         params = self.bottleneck(x).view(B, L, self.n_heads, 5)
         sem_amp, sem_phase, ctx_amp, ctx_phase, decay_raw = params.unbind(-1)
         
         sem_amp, ctx_amp = torch.sigmoid(sem_amp), torch.sigmoid(ctx_amp)
         sem_phase, ctx_phase = torch.tanh(sem_phase) * math.pi, torch.tanh(ctx_phase) * math.pi
         
-        # 干涉物理模型
+        # 🌟 2. 自適應衰減率 (Exponential Decay)
+        # 讓模型學會遺忘：0.1 (快速遺忘) ~ 0.99 (長久記憶)
+        decay_rate = 0.1 + 0.89 * torch.sigmoid(decay_raw) 
+        
+        # 3. 干涉門控
         temp = torch.clamp(self.temperature, 0.1, 2.0)
         cos_diff = torch.cos(sem_phase - ctx_phase)
         interference = torch.tanh(sem_amp * ctx_amp * cos_diff) * temp
@@ -102,18 +107,34 @@ class ResonanceMemoryAttentionV15(nn.Module):
         k_f = (F.elu(k.float()) + 1.0).view(B, L, self.n_heads, self.d_head)
         v_f = v.float().view(B, L, self.n_heads, self.d_head)
 
-        # 🚀 極速並行版：使用 cumsum 模擬線性累積
-        # 注意：目前的 cumsum 是 Decay=1 的狀態。
-        kv_all = k_f.unsqueeze(-1) @ v_f.unsqueeze(-2) 
-        gate_ext = gate.view(B, L, self.n_heads, 1, 1)
-        kv_gated = kv_all * (1.0 + gate_ext)
+        # 🚀 4. 並行化衰減掃描 (Parallel Decay Scan)
+        # 實現公式: S_t = S_{t-1} * dt + Input_t * (1 - dt)
+        log_decay = torch.log(decay_rate)
+        cum_log_decay = torch.cumsum(log_decay, dim=1)
+        decay_factor = torch.exp(cum_log_decay) # [B, L, H]
         
-        kv_states = torch.cumsum(kv_gated, dim=1).transpose(1, 2) 
-        z_states = torch.cumsum(k_f, dim=1) 
+        # 擴展維度以便矩陣運算
+        df_kv = decay_factor.unsqueeze(-1).unsqueeze(-1)
+        df_z = decay_factor.unsqueeze(-1)
+        
+        # 準備輸入項，結合 Gate 與 EMA 係數 (1 - dt)
+        ema_weight = (1.0 - decay_rate).unsqueeze(-1).unsqueeze(-1)
+        kv_all = (k_f.unsqueeze(-1) @ v_f.unsqueeze(-2)) * (1.0 + gate.view(B, L, self.n_heads, 1, 1))
+        kv_input = kv_all * ema_weight
+        
+        # 分子累積 (Memory State)
+        kv_states = torch.cumsum(kv_input / (df_kv + 1e-6), dim=1) * df_kv
+        kv_states = kv_states.transpose(1, 2) # [B, H, L, d, d]
+        
+        # 分母累積 (Normalizer)
+        z_input = k_f * (1.0 - decay_rate).unsqueeze(-1)
+        z_states = torch.cumsum(z_input / (df_z + 1e-6), dim=1) * df_z # [B, L, H, d]
 
-        q_f_trans = q_f.transpose(1, 2).unsqueeze(-2) 
-        out_num = torch.matmul(q_f_trans, kv_states).squeeze(-2) 
+        # 5. 輸出計算
+        q_f_trans = q_f.transpose(1, 2).unsqueeze(-2) # [B, H, L, 1, d]
+        out_num = torch.matmul(q_f_trans, kv_states).squeeze(-2) # [B, H, L, d]
 
+        # 正確的分母歸一化
         den = (q_f * z_states).sum(dim=-1).unsqueeze(-1).transpose(1, 2) + 1e-6
         out = out_num / den 
 
