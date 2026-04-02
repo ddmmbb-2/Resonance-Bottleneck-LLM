@@ -19,7 +19,7 @@ Traditional linear attention often suffers from "memory blurring" and numerical 
 **V15 solves these via:**
 1.  **Wave-Interference Routing (波干涉隱式路由):** No explicit expert networks. Features are mapped to "waves" with **Amplitude** and **Phase**. Interaction between features (constructive or destructive interference) naturally emerges as a context-specific activation (Gate).
 2.  **Head-wise Memory Filter (多頭記憶過濾器):** Each head possesses independent resonance frequencies and decay rates. The model doesn't just "look" at data; it dynamically decides which memories to amplify or forget via gated resonance.
-
+![png](20260402.png)
 ---
 
 ## ✨ V15 Key Features | 技術亮點
