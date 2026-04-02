@@ -21,9 +21,9 @@ config = {
     "batch_size": 1,         # 3060 建議從 1 開始，若顯存夠再往上加
     "block_size": 512,       
     "accum_steps": 16,       # 提高累加步數來彌補 batch_size=1 的不穩定
-    "lr": 2e-4,              
+    "lr": 5e-5,              
     "epochs": 100000,         
-    "warmup_steps": 3000,    
+    "warmup_steps": 500,    
     "data_dir": "data",      
     "bin_data": "corpus_v15.bin", # 🆕 預處理後的二進位檔
     "save_model": "d2_v15_resonance_plus.pth",
