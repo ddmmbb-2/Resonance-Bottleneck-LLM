@@ -73,7 +73,7 @@ Place your `.txt` corpus into the `data/` folder.
 
 **3. Start Training | 啟動訓練**
 ```bash
-python d2-v15-resonance-plus.py
+python ResonanceBottleneckLLM.py
 ```
 
 **4. Async Monitoring | 異步監控**
