@@ -18,20 +18,20 @@ config = {
     "d_model": 768,          
     "n_heads": 12,           
     "n_layers": 12,          
-    "batch_size": 1,         # 3060 建議從 1 開始，若顯存夠再往上加
-    "block_size": 512,       
-    "accum_steps": 16,       # 提高累加步數來彌補 batch_size=1 的不穩定
-    "lr": 5e-5,              
+    "batch_size": 1,
+    "block_size": 512,
+    "accum_steps": 32,       
+    "lr": 1e-4,              # ⬅️ 從頭開始，給予標準的 1e-4 動能
     "epochs": 100000,         
-    "warmup_steps": 500,    
+    "warmup_steps": 2000,    # ⬅️ 暖身拉長到 2000 步，讓初始權重更平穩過渡
     "data_dir": "data",      
-    "bin_data": "corpus_v15.bin", # 🆕 預處理後的二進位檔
+    "bin_data": "corpus_v15_clean.bin", 
     "save_model": "d2_v15_resonance_plus.pth",
     "vocab_name": "bpe_tokenizer_v12.json",     
     "vocab_size": 16384,                      
-    "l1_lambda": 0.02,       
+    "l1_lambda": 0.001,      # ⬅️ 起步保持 0.001，讓守門員去自動調降
     "balance_lambda": 0.05,
-    "entropy_lambda": 0.01   
+    "entropy_lambda": 0.005   
 }
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -204,17 +204,32 @@ if os.path.exists(config["save_model"]):
     print(f"♻️ 接續訓練: {config['save_model']}")
     ckpt = torch.load(config["save_model"], map_location=device)
     model.load_state_dict(ckpt['model_state_dict'])
+    
+    # ⚠️ 這裡最關鍵：load_state_dict 會把舊的 2e-4 讀回來
     optimizer.load_state_dict(ckpt['optimizer_state_dict'])
     global_step = ckpt.get('step', 0)
 
-# --- 核心修復：強制重置學習率與相對調度器 ---
+# --- 核心修復：強制重置學習率 (必須放在 load_state_dict 之後) ---
 for param_group in optimizer.param_groups:
     param_group['lr'] = config["lr"]
+    param_group['initial_lr'] = config["lr"]  # ⬅️ 加入這行，徹底洗掉舊的 2e-4
+
+# 🔍 在這裡進行 DEBUG 檢查，確保修復成功
+print("-" * 30)
+print(f"DEBUG: Config 設定值應該是: {config['lr']}")
+print(f"DEBUG: Optimizer 當前實際 LR: {optimizer.param_groups[0]['lr']:.2e}")
+if optimizer.param_groups[0]['lr'] > 5e-5:
+    print("⚠️ 警告：偵測到 LR 異常偏高！正在進行最後強制修正...")
+    for pg in optimizer.param_groups:
+        pg['lr'] = config["lr"]
+print("-" * 30)
 
 # 紀錄重啟時的起點，用來計算相對暖身
 restart_step = global_step 
 warmup_scheduler = LambdaLR(optimizer, lambda s: min(1.0, (s + 1) / config["warmup_steps"]))
-auto_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
+auto_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    optimizer, mode='min', factor=0.5, patience=25, verbose=True
+)
 
 print(f"🌟 模型參數: {sum(p.numel() for p in model.parameters())/1e6:.1f}M")
 print(f"🚀 已喚醒模型！將從 Step {global_step} 開始進行 {config['warmup_steps']} 步相對暖身。")
@@ -242,14 +257,39 @@ while global_step < config["epochs"]:
     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
     optimizer.step()
     
+    # 確保這兩個平均值在每一步都有計算到
     avg_loss = total_loss / config["accum_steps"]
+    avg_ent = total_ent / config["accum_steps"]
     
-    # --- 智慧 LR 調度 (相對判斷) ---
+    
+    # ==========================================
+    # 🛡️ 自動駕駛守門員 (Autopilot Watchdog)
+    # ==========================================
     current_relative_step = global_step - restart_step
+    
     if current_relative_step < config["warmup_steps"]:
         warmup_scheduler.step()
     elif global_step % 100 == 0:
+        # 1. 正常的平原期自動降速 (Loss 降不下來時觸發)
         auto_scheduler.step(avg_loss)
+        
+        current_lr = optimizer.param_groups[0]['lr']
+        
+        # 🚨 2. 防燒毀機制 (Loss 暴衝警報)
+        # 如果 Loss 突然飆高超過 4.8，且學習率還不算太低，強制直接砍半
+        if avg_loss > 4.8 and current_lr > 1e-5:
+            print(f"\n🚨 [守門員] 偵測到 Loss 暴衝 ({avg_loss:.3f})！緊急將 LR 砍半至 {current_lr * 0.5:.2e}")
+            for pg in optimizer.param_groups:
+                pg['lr'] *= 0.5
+                
+        # ⚠️ 3. 防變笨機制 (模式坍塌警報)
+        # 如果熵值跌破安全線 0.30，代表模型快要變成複讀機了
+        if avg_ent < 0.30:
+            # 自動放寬 L1 懲罰 (每次打 9 折，最低降到 1e-5)
+            config["l1_lambda"] = max(1e-5, config["l1_lambda"] * 0.90)
+            # 自動提高多樣性獎勵
+            config["entropy_lambda"] = min(0.02, config["entropy_lambda"] * 1.05)
+            print(f"\n⚠️ [守門員] 熵值過低 ({avg_ent:.3f})！自動放寬 L1 懲罰至 {config['l1_lambda']:.5f}")
 
     global_step += 1
     
@@ -273,11 +313,20 @@ while global_step < config["epochs"]:
         "Gate": f"{total_sparse/config['accum_steps']:.3f}"
     })
 
-    # --- 自動存檔 ---
-    if global_step % 2000 == 0:
-        torch.save({
+    # --- 自動存檔 (增加里程碑備份) ---
+    if global_step % 5000 == 0:
+        # 定義存檔內容
+        checkpoint = {
             'step': global_step, 
             'model_state_dict': model.state_dict(), 
             'optimizer_state_dict': optimizer.state_dict()
-        }, config["save_model"])
-        print(f"🚩 Step {global_step} 存檔成功")
+        }
+        
+        # 1. 備份時光機 (帶編號，不會被覆蓋)
+        backup_name = f"d2_v15_step_{global_step}.pth"
+        torch.save(checkpoint, backup_name)
+        
+        # 2. 更新最新權重 (方便接續訓練用)
+        torch.save(checkpoint, config["save_model"])
+        
+        print(f"🚩 Step {global_step} 存檔成功！已建立備份：{backup_name}")
