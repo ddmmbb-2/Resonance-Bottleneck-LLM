@@ -18,9 +18,9 @@ config = {
     "d_model": 768,          
     "n_heads": 12,           
     "n_layers": 12,          
-    "batch_size": 1,
+    "batch_size": 4,
     "block_size": 512,
-    "accum_steps": 32,       
+    "accum_steps": 8,       
     "lr": 1e-4,              # ⬅️ 從頭開始，給予標準的 1e-4 動能
     "epochs": 100000,         
     "warmup_steps": 2000,    # ⬅️ 暖身拉長到 2000 步，讓初始權重更平穩過渡
@@ -95,7 +95,7 @@ class ResonanceMemoryAttentionV15(nn.Module):
         
         # 🌟 2. 自適應衰減率 (Exponential Decay)
         # 讓模型學會遺忘：0.1 (快速遺忘) ~ 0.99 (長久記憶)
-        decay_rate = 0.1 + 0.89 * torch.sigmoid(decay_raw) 
+        decay_rate = 0.5 + 0.49 * torch.sigmoid(decay_raw) 
         
         # 3. 干涉門控
         temp = torch.clamp(self.temperature, 0.1, 2.0)
@@ -107,28 +107,45 @@ class ResonanceMemoryAttentionV15(nn.Module):
         k_f = (F.elu(k.float()) + 1.0).view(B, L, self.n_heads, self.d_head)
         v_f = v.float().view(B, L, self.n_heads, self.d_head)
 
-        # 🚀 4. 並行化衰減掃描 (Parallel Decay Scan)
-        # 實現公式: S_t = S_{t-1} * dt + Input_t * (1 - dt)
-        log_decay = torch.log(decay_rate)
+        # 🚀 4. 並行化衰減掃描 (O(N) 終極防護版)
+        # 強制轉 FP32 獲取更大的指數安全區間
+        decay_rate_f32 = decay_rate.float()
+        k_f32 = k_f.float()
+        v_f32 = v_f.float()
+        gate_f32 = gate.float()
+
+        log_decay = torch.log(decay_rate_f32 + 1e-8)
         cum_log_decay = torch.cumsum(log_decay, dim=1)
-        decay_factor = torch.exp(cum_log_decay) # [B, L, H]
         
-        # 擴展維度以便矩陣運算
+        # 👉 策略：Clamp log (設立 FP32 絕對安全結界)
+        # FP32 的 exp 上限約為 88.7，我們 clamp 在 -85.0。
+        # 這樣等一下取負號 exp(-(-85.0)) 時，數值最大只會到 e^85 (約 8e36)，絕對安全！
+        cum_log_decay = torch.clamp(cum_log_decay, min=-85.0)
+        
+        # 👉 策略：避免除法 (用乘法代替)
+        decay_factor = torch.exp(cum_log_decay)          # 用於乘回外部
+        inv_decay_factor = torch.exp(-cum_log_decay)     # 用於抵銷輸入 (取代除法)
+
         df_kv = decay_factor.unsqueeze(-1).unsqueeze(-1)
+        inv_df_kv = inv_decay_factor.unsqueeze(-1).unsqueeze(-1)
+        
         df_z = decay_factor.unsqueeze(-1)
-        
-        # 準備輸入項，結合 Gate 與 EMA 係數 (1 - dt)
-        ema_weight = (1.0 - decay_rate).unsqueeze(-1).unsqueeze(-1)
-        kv_all = (k_f.unsqueeze(-1) @ v_f.unsqueeze(-2)) * (1.0 + gate.view(B, L, self.n_heads, 1, 1))
+        inv_df_z = inv_decay_factor.unsqueeze(-1)
+
+        ema_weight = (1.0 - decay_rate_f32).unsqueeze(-1).unsqueeze(-1)
+        kv_all = (k_f32.unsqueeze(-1) @ v_f32.unsqueeze(-2)) * (1.0 + gate_f32.view(B, L, self.n_heads, 1, 1))
         kv_input = kv_all * ema_weight
+
+        # ⚡ O(N) Prefix Sum，全程無除法！
+        kv_states = torch.cumsum(kv_input * inv_df_kv, dim=1) * df_kv
+        kv_states = kv_states.transpose(1, 2)
         
-        # 分子累積 (Memory State)
-        kv_states = torch.cumsum(kv_input / (df_kv + 1e-6), dim=1) * df_kv
-        kv_states = kv_states.transpose(1, 2) # [B, H, L, d, d]
-        
-        # 分母累積 (Normalizer)
-        z_input = k_f * (1.0 - decay_rate).unsqueeze(-1)
-        z_states = torch.cumsum(z_input / (df_z + 1e-6), dim=1) * df_z # [B, L, H, d]
+        z_input = k_f32 * (1.0 - decay_rate_f32).unsqueeze(-1)
+        z_states = torch.cumsum(z_input * inv_df_z, dim=1) * df_z
+
+        # 安全算完後，優雅地轉回 bfloat16 輸出
+        kv_states = kv_states.to(x.dtype)
+        z_states = z_states.to(x.dtype)
 
         # 5. 輸出計算
         q_f_trans = q_f.transpose(1, 2).unsqueeze(-2) # [B, H, L, 1, d]
