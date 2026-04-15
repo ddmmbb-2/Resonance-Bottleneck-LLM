@@ -64,7 +64,7 @@ config = {
 
     "balance_lambda": 0.05,
 
-    "entropy_lambda": 0.005   
+    "entropy_lambda": 0.008   
 
 }
 
@@ -552,7 +552,7 @@ while global_step < config["epochs"]:
 
         # 如果 Loss 突然飆高超過 4.8，且學習率還不算太低，強制直接砍半
 
-        if avg_loss > 4.8 and current_lr > 1e-5:
+        if avg_loss > 8.5 and current_lr > 1e-5:
 
             print(f"\n🚨 [守門員] 偵測到 Loss 暴衝 ({avg_loss:.3f})！緊急將 LR 砍半至 {current_lr * 0.5:.2e}")
 
