@@ -88,7 +88,7 @@ python monitor_resonance.py
 
 * **Gate (Sparsity):** Reflects the activation ratio of the resonance mechanism. A healthy model stabilizes between `0.3 ~ 0.6`.
 * **Ent (Entropy):** Diversity of the gating mechanism. If this drops to 0, "Routing Collapse" has occurred.
-
+![png](Figure_1.png)
 ---
 
 ## 📜 License & Acknowledgements | 授權與致謝
